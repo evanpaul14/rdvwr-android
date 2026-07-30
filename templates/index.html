@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="RDVWR">
+<title>RDVWR</title>
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+<link rel="alternate icon" type="image/x-icon" href="{{ url_for('static', filename='favicon.ico') }}">
+<link rel="apple-touch-icon" sizes="180x180" href="{{ url_for('static', filename='apple-touch-icon.png') }}">
+<link rel="apple-touch-icon" sizes="152x152" href="{{ url_for('static', filename='apple-touch-icon-152x152.png') }}">
+<link rel="apple-touch-icon" sizes="120x120" href="{{ url_for('static', filename='apple-touch-icon-120x120.png') }}">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;700&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+<noscript><link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;700&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet"></noscript>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.min.css') }}">
+<link rel="modulepreload" href="{{ url_for('static', filename='app.bundle.js') }}">
+</head>
+<body>
+
+<!-- ── Header ── -->
+<header class="header">
+  <div class="header-inner">
+    <button class="logo" id="logo-btn" aria-label="Go home">RDVWR</button>
+    <button class="popular-btn" id="popular-btn" aria-label="Popular feed">popular</button>
+    <div class="search-container">
+      <div class="search-wrap">
+        <span class="search-prefix" aria-hidden="true">r /</span>
+        <input id="subreddit-input" type="text" placeholder="search" autocomplete="off" autocorrect="off" spellcheck="false" aria-label="Subreddit name" aria-autocomplete="list" aria-expanded="false" aria-controls="autocomplete-dropdown">
+        <button id="search-btn" title="Load subreddit" aria-label="Search">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M10 10L14 14M11 6A5 5 0 1 1 1 6a5 5 0 0 1 10 0Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
+      <div class="autocomplete-dropdown" id="autocomplete-dropdown" role="listbox"></div>
+    </div>
+    <a class="main-open" id="main-open" href="#" target="_blank" rel="noopener">↗ reddit</a>
+    <button class="settings-btn" id="settings-btn" title="Settings" aria-label="Settings">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </button>
+  </div>
+  <div class="sort-bar" id="sort-bar" style="display:none">
+    <button class="sort-btn" data-sort="hot">Hot</button>
+    <button class="sort-btn" data-sort="new">New</button>
+    <button class="sort-btn active" data-sort="top">Top</button>
+    <button class="sort-btn" data-sort="rising">Rising</button>
+  </div>
+</header>
+
+<main>
+<!-- ── Context info (sub or user) ── -->
+<div class="ctx-info" id="ctx-info">
+  <div id="ctx-icon-wrap"></div>
+  <div class="ctx-meta">
+    <div class="ctx-title" id="ctx-title"></div>
+    <div class="ctx-stats" id="ctx-stats"></div>
+  </div>
+</div>
+
+<!-- ── Sidebar panel ── -->
+<div class="sidebar-panel" id="sidebar-panel">
+  <div class="sidebar-inner" id="sidebar-inner"></div>
+</div>
+
+<!-- ── Search type bar (posts / communities / users) ── -->
+<div class="search-type-bar" id="search-type-bar" style="display:none">
+  <button class="search-type-btn active" data-stype="posts">Posts</button>
+  <button class="search-type-btn" data-stype="communities">Communities</button>
+  <button class="search-type-btn" data-stype="users">Users</button>
+</div>
+
+<!-- ── Feed ── -->
+<div id="feed">
+<div class="skeleton-post"><div class="skel-header"><div class="skel skel-title"></div><div class="skel skel-title2"></div></div><div class="skel skel-banner"></div><div class="skel skel-footer"></div></div>
+<div class="skeleton-post skel-compact"><div class="skel-compact-left"><div class="skel-header"><div class="skel skel-title"></div><div class="skel skel-title2"></div></div><div class="skel skel-footer"></div></div><div class="skel skel-compact-thumb"></div></div>
+<div class="skeleton-post"><div class="skel-header"><div class="skel skel-title"></div><div class="skel skel-title2"></div></div><div class="skel skel-banner"></div><div class="skel skel-footer"></div></div>
+<div class="skeleton-post"><div class="skel-header"><div class="skel skel-title"></div><div class="skel skel-title2"></div></div><div class="skel skel-banner"></div><div class="skel skel-footer"></div></div>
+<div class="skeleton-post skel-compact"><div class="skel-compact-left"><div class="skel-header"><div class="skel skel-title"></div><div class="skel skel-title2"></div></div><div class="skel skel-footer"></div></div><div class="skel skel-compact-thumb"></div></div>
+</div>
+<div id="scroll-sentinel"></div>
+</main>
+
+<!-- ── Full-screen Post View ── -->
+<div class="post-view" id="post-view" role="dialog" aria-modal="true" aria-label="Post">
+  <div class="pv-bar">
+    <div class="pv-bar-left">
+      <button class="pv-home" id="pv-home">home</button>
+      <div class="pv-breadcrumb" id="pv-breadcrumb" style="display:none"></div>
+    </div>
+    <div class="search-container pv-search-container">
+      <div class="search-wrap pv-search-wrap">
+        <span class="search-prefix">r /</span>
+        <input id="pv-subreddit-input" type="text" placeholder="search" autocomplete="off" autocorrect="off" spellcheck="false" aria-label="Subreddit name" aria-autocomplete="list" aria-expanded="false" aria-controls="pv-autocomplete-dropdown">
+        <button id="pv-search-btn" title="Load subreddit" aria-label="Search">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M10 10L14 14M11 6A5 5 0 1 1 1 6a5 5 0 0 1 10 0Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
+      <div class="autocomplete-dropdown" id="pv-autocomplete-dropdown" role="listbox"></div>
+    </div>
+    <div class="pv-bar-right">
+      <a class="pv-open" id="pv-open" href="#" target="_blank" rel="noopener">↗ reddit</a>
+    </div>
+  </div>
+  <div class="pv-scroll" id="pv-scroll">
+    <div class="pv-wrap" id="pv-content"></div>
+  </div>
+</div>
+
+<div id="lightbox"><button id="lightbox-close" aria-label="Close"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M1 1l12 12M13 1L1 13" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button><img id="lightbox-img" alt=""></div>
+
+<!-- ── Settings panel ── -->
+<div class="settings-overlay" id="settings-overlay"></div>
+<div class="settings-panel" id="settings-panel" role="dialog" aria-modal="true" aria-label="Settings">
+  <div class="settings-header">
+    <span class="settings-title">Settings</span>
+    <button class="settings-close" id="settings-close" aria-label="Close settings">✕</button>
+  </div>
+  <div class="settings-body" id="settings-body"></div>
+</div>
+{% if initial_data %}<script>window.__INITIAL_DATA__={{ initial_data | tojson | safe }};</script>{% endif %}
+{% if initial_about %}<script>window.__INITIAL_ABOUT__={{ initial_about | tojson | safe }};</script>{% endif %}
+<script type="module" src="{{ url_for('static', filename='app.bundle.js') }}"></script>
+</body>
+</html>

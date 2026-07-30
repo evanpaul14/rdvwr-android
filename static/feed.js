@@ -1,0 +1,367 @@
+import { state } from './state.js';
+import { settings } from './settings.js';
+import { escHtml, fmtNum, fmtDate, errState, buildTimeFilterHtml, SKELETON_COUNT } from './utils.js';
+import { renderPost } from './render.js';
+import { initMedia, initGifVideos } from './media.js';
+
+// ── DOM refs ──────────────────────────────────────────────────────────────────
+const feed        = document.getElementById('feed');
+export const sortBar     = document.getElementById('sort-bar');
+const ctxInfo     = document.getElementById('ctx-info');
+const sentinel    = document.getElementById('scroll-sentinel');
+const subInput    = document.getElementById('subreddit-input');
+const pvSubInput  = document.getElementById('pv-subreddit-input');
+const mainOpen    = document.getElementById('main-open');
+
+export function setMainOpen(href) { mainOpen.href = href || '#'; }
+
+// ── Sort bar builders ─────────────────────────────────────────────────────────
+export function buildSubSortHtml(sort='top', time='all', sub='') {
+  const btns = ['best','hot','new','top','rising','controversial'].map(s =>
+    `<button class="sort-btn${s===sort?' active':''}" data-sort="${s}">${s.charAt(0).toUpperCase()+s.slice(1)}</button>`
+  ).join('');
+  const isPop = sub.toLowerCase() === 'popular';
+  const sidebarBtn = isPop ? '' : `<button class="sidebar-toggle" id="sidebar-toggle-btn" aria-expanded="false">sidebar</button>`;
+  const wikiBtn = isPop ? '' : `<a class="sort-btn sort-btn-wiki" href="/r/${escHtml(sub)}/wiki" data-nav="/r/${escHtml(sub)}/wiki">wiki</a>`;
+  return btns + (sort==='top'||sort==='controversial' ? buildTimeFilterHtml(time) : '') + sidebarBtn + wikiBtn;
+}
+
+// ── Feed utilities ────────────────────────────────────────────────────────────
+export function showSkeletons() {
+  state.selectedPostIdx = -1;
+  sentinel.innerHTML = '';
+  feed.innerHTML = Array.from({length:SKELETON_COUNT}, (_, i) => {
+    if (i % 3 === 1) return `
+    <div class="skeleton-post skel-compact">
+      <div class="skel-compact-left">
+        <div class="skel-header"><div class="skel skel-title"></div><div class="skel skel-title2"></div></div>
+        <div class="skel skel-footer"></div>
+      </div>
+      <div class="skel skel-compact-thumb"></div>
+    </div>`;
+    return `
+    <div class="skeleton-post">
+      <div class="skel-header"><div class="skel skel-title"></div><div class="skel skel-title2"></div></div>
+      <div class="skel skel-banner"></div>
+      <div class="skel skel-footer"></div>
+    </div>`;
+  }).join('');
+  sentinel.classList.remove('active', 'loading');
+}
+
+// ── Home feed ─────────────────────────────────────────────────────────────────
+export function buildHomeSortHtml(sort='best', time='all') {
+  const btns = ['best','hot','new','top','rising','controversial'].map(s =>
+    `<button class="sort-btn${s===sort?' active':''}" data-sort="${s}">${s.charAt(0).toUpperCase()+s.slice(1)}</button>`
+  ).join('');
+  return btns + (sort==='top'||sort==='controversial' ? buildTimeFilterHtml(time) : '');
+}
+
+export async function loadHomeFeed(sort, time, after=null, append=false) {
+  if (append && state.loading) return;
+  if (!append) state.feedGen++;
+  const myGen = state.feedGen;
+  state.loading = true;
+  if (!append) showSkeletons();
+  else sentinel.classList.add('loading');
+  try {
+    let url = `/api/home?sort=${sort}`;
+    if (sort === 'top' || sort === 'controversial') url += `&t=${time || 'all'}`;
+    if (after) url += `&after=${encodeURIComponent(after)}`;
+    const fetchOpts = settings.redditCookies ? { headers: { 'X-Reddit-Cookie': settings.redditCookies } } : {};
+    const res  = await fetch(url, fetchOpts);
+    const data = await res.json();
+    if (myGen !== state.feedGen) return;
+    if (!res.ok) {
+      if (!append) feed.innerHTML = errState(escHtml(data.error||'Error'), 'feed');
+      return;
+    }
+    if (!append) feed.innerHTML = '';
+    if (!data.posts.length && !append) {
+      feed.innerHTML = '<div class="state"><div class="state-icon">∅</div><div class="state-title">No posts found</div></div>';
+      return;
+    }
+    const startIdx = append ? feed.querySelectorAll('.post').length : 0;
+    const tmp = document.createElement('div');
+    const parts = [];
+    data.posts.forEach((p, i) => {
+      parts.push(renderPost(p, startIdx + i, true));
+    });
+    tmp.innerHTML = parts.join('');
+    initMedia(tmp);
+    while (tmp.firstChild) feed.appendChild(tmp.firstChild);
+    initGifVideos(feed);
+    state.afterToken = data.after;
+    sentinel.classList.remove('loading');
+  } catch { if (!append && myGen === state.feedGen) feed.innerHTML = errState('Network error', 'feed'); }
+  finally  { if (myGen === state.feedGen) state.loading = false; }
+}
+
+export async function loadHome(sort='best', time='all', after=null) {
+  state.homeMode    = true;
+  state.profileMode = false;
+  state.multiMode   = false;
+  state.currentSub  = '';
+  state.currentSort = sort;
+  state.currentTime = time;
+  state.afterToken  = null;
+  state.currentAfter = after;
+  document.title = 'Home — RDVWR';
+  subInput.value = '';
+  pvSubInput.value = '';
+  setMainOpen('https://www.reddit.com/');
+  sortBar.innerHTML = buildHomeSortHtml(sort, time);
+  sortBar.style.display = 'flex';
+  ctxInfo.classList.remove('visible');
+  await loadHomeFeed(sort, time, after);
+}
+
+// ── Subreddit feed ────────────────────────────────────────────────────────────
+const _aboutCache = new Map();
+const ABOUT_CACHE_TTL = 5 * 60 * 1000;
+const SUB_STATE_LABELS = {
+  restricted:      'restricted',
+  archived:        'archived',
+  quarantined:     'quarantined',
+  gold_restricted: 'coin-restricted',
+  employees_only:  'staff-only',
+  user:            'user profile',
+};
+
+export async function loadAbout(sub) {
+  try {
+    let d;
+    const key = sub.toLowerCase();
+    const inj = window.__INITIAL_ABOUT__;
+    const cached = _aboutCache.get(key);
+    if (inj && inj._sub === key) {
+      window.__INITIAL_ABOUT__ = null;
+      d = inj;
+      _aboutCache.set(key, { d, ts: Date.now() });
+    } else if (cached && Date.now() - cached.ts < ABOUT_CACHE_TTL) {
+      d = cached.d;
+    } else {
+      const res = await fetch(`/api/r/${encodeURIComponent(sub)}/about`);
+      if (!res.ok) return;
+      d = await res.json();
+      _aboutCache.set(key, { d, ts: Date.now() });
+    }
+    document.getElementById('ctx-icon-wrap').innerHTML = d.icon
+      ? `<img class="ctx-icon" src="${escHtml(d.icon)}" alt="" onerror="this.style.display='none'">` : '';
+    document.getElementById('ctx-title').textContent = d.title || `r/${sub}`;
+    const activePart = d.active ? ` · <span>${fmtNum(d.active)}</span> online` : '';
+    const statePart = d.state ? ` · <span class="ctx-state">${escHtml(SUB_STATE_LABELS[d.state] || d.state)}</span>` : '';
+    document.getElementById('ctx-stats').innerHTML = `<span>${fmtNum(d.subscribers)}</span> members${activePart}${statePart}`;
+    ctxInfo.classList.add('visible');
+  } catch {}
+}
+
+async function fetchPosts(sub, sort, time, after, quarantineOptIn=false) {
+  let url = `/api/r/${encodeURIComponent(sub)}?sort=${sort}`;
+  if (sort === 'top' || sort === 'controversial') url += `&t=${time || 'all'}`;
+  if (after) url += `&after=${after}`;
+  if (quarantineOptIn) url += '&quarantine_opt_in=1';
+  return fetch(url);
+}
+
+export async function loadSubFeed(sub, sort, time='all', after=null, append=false, quarantineOptIn=false) {
+  if (append && state.loading) return;
+  if (!append) state.feedGen++;
+  const myGen = state.feedGen;
+  state.loading = true;
+  if (!append) showSkeletons();
+  else sentinel.classList.add('loading');
+  try {
+    let data, ok, status;
+    const inj = !append && !quarantineOptIn && window.__INITIAL_DATA__;
+    if (inj && inj._sub === sub.toLowerCase() && inj._sort === sort && inj._time === (time || 'all')) {
+      window.__INITIAL_DATA__ = null;
+      data = inj;
+      ok = true;
+    } else {
+      const res = await fetchPosts(sub, sort, time, after, quarantineOptIn);
+      data = await res.json();
+      ok = res.ok;
+      status = res.status;
+    }
+    if (myGen !== state.feedGen) return;
+    if (!ok) {
+      if (!append) {
+        if (data.state === 'not_found') return { notFound: true };
+        if (data.state === 'quarantined') {
+          feed.innerHTML = `<div class="state state-quarantine">
+            <div class="state-icon">⚠</div>
+            <div class="state-title">This subreddit is quarantined</div>
+            ${data.error ? `<div class="state-sub">${escHtml(data.error)}</div>` : ''}
+            <button class="state-continue-btn" data-sub="${escHtml(sub)}" data-sort="${escHtml(sort)}" data-time="${escHtml(time||'all')}">Continue</button>
+          </div>`;
+        } else {
+          feed.innerHTML = errState(escHtml(data.error||'Error'), 'feed');
+        }
+      }
+      return;
+    }
+    if (!append) feed.innerHTML = '';
+    if (!data.posts.length && !append) {
+      feed.innerHTML = '<div class="state"><div class="state-icon">∅</div><div class="state-title">No posts found</div></div>';
+      return;
+    }
+    const startIdx = append ? feed.children.length : 0;
+    const multiSub = state.currentSub === 'popular' || state.currentSub === 'all';
+    const tmp = document.createElement('div');
+    tmp.innerHTML = data.posts.map((p,i)=>renderPost(p,startIdx+i,multiSub)).join('');
+    initMedia(tmp);
+    while (tmp.firstChild) feed.appendChild(tmp.firstChild);
+    initGifVideos(feed);
+    state.afterToken = data.after;
+    sentinel.classList.remove('loading');
+  } catch { if (!append && myGen === state.feedGen) feed.innerHTML = errState('Network error', 'feed'); }
+  finally  { if (myGen === state.feedGen) state.loading = false; }
+}
+
+export async function loadSubreddit(sub, sort='top', time='all', after=null) {
+  state.profileMode = false;
+  state.multiMode   = false;
+  state.currentSub  = sub.trim();
+  state.currentSort = sort;
+  state.currentTime = time;
+  state.afterToken  = null;
+  state.currentAfter = after;
+  document.title = `r/${state.currentSub} — RDVWR`;
+  subInput.value = state.currentSub;
+  pvSubInput.value = state.currentSub;
+  setMainOpen(`https://www.reddit.com/r/${encodeURIComponent(state.currentSub)}/${sort}/`);
+  sortBar.innerHTML = buildSubSortHtml(sort, time, sub);
+  sortBar.style.display = 'flex';
+  ctxInfo.classList.remove('visible');
+  loadAbout(state.currentSub);
+  return await loadSubFeed(state.currentSub, state.currentSort, state.currentTime, after);
+}
+
+// ── Multi feed ────────────────────────────────────────────────────────────────
+export async function loadMultiFeed(username, multiname, sort, time, after=null, append=false) {
+  if (append && state.loading) return;
+  if (!append) state.feedGen++;
+  const myGen = state.feedGen;
+  state.loading = true;
+  if (!append) showSkeletons();
+  else sentinel.classList.add('loading');
+  try {
+    let url = `/api/user/${encodeURIComponent(username)}/m/${encodeURIComponent(multiname)}?sort=${sort}`;
+    if (sort === 'top' || sort === 'controversial') url += `&t=${time || 'all'}`;
+    if (after) url += `&after=${after}`;
+    const res  = await fetch(url);
+    const data = await res.json();
+    if (myGen !== state.feedGen) return;
+    if (!res.ok) {
+      if (!append) feed.innerHTML = errState(escHtml(data.error || 'Error'), 'feed');
+      return;
+    }
+    if (!append && data.title) {
+      document.title = `${data.title} — RDVWR`;
+      document.getElementById('ctx-title').textContent = data.title;
+      document.getElementById('ctx-icon-wrap').innerHTML = '';
+      document.getElementById('ctx-stats').innerHTML = `<span>u/${escHtml(username)}</span> multireddit`;
+      ctxInfo.classList.add('visible');
+    }
+    if (!append) feed.innerHTML = '';
+    if (!data.posts.length && !append) {
+      feed.innerHTML = '<div class="state"><div class="state-icon">∅</div><div class="state-title">No posts found</div></div>';
+      return;
+    }
+    const startIdx = append ? feed.children.length : 0;
+    const tmp = document.createElement('div');
+    tmp.innerHTML = data.posts.map((p, i) => renderPost(p, startIdx + i, true)).join('');
+    initMedia(tmp);
+    while (tmp.firstChild) feed.appendChild(tmp.firstChild);
+    initGifVideos(feed);
+    state.afterToken = data.after;
+    sentinel.classList.remove('loading');
+  } catch { if (!append && myGen === state.feedGen) feed.innerHTML = errState('Network error', 'feed'); }
+  finally  { if (myGen === state.feedGen) state.loading = false; }
+}
+
+export async function loadMultireddit(username, multiname, sort='hot', time='all', after=null) {
+  state.profileMode   = false;
+  state.multiMode     = true;
+  state.multiUsername = username;
+  state.multiName     = multiname;
+  state.currentSort   = sort;
+  state.currentTime   = time;
+  state.afterToken    = null;
+  state.currentAfter  = after;
+  document.title = `${multiname} — RDVWR`;
+  subInput.value = `user/${username}/m/${multiname}`;
+  pvSubInput.value = `user/${username}/m/${multiname}`;
+  setMainOpen(`https://www.reddit.com/user/${encodeURIComponent(username)}/m/${encodeURIComponent(multiname)}/${sort}/`);
+  sortBar.innerHTML = buildSubSortHtml(sort, time, '');
+  sortBar.style.display = 'flex';
+  ctxInfo.classList.remove('visible');
+  await loadMultiFeed(username, multiname, sort, time, after);
+}
+
+// ── Duplicates ────────────────────────────────────────────────────────────────
+export async function loadDuplicatesPage(sub, postId, after=null, append=false) {
+  if (append && state.loading) return;
+  if (!append) state.feedGen++;
+  const myGen = state.feedGen;
+  state.loading = true;
+  state.duplicatesMode   = true;
+  state.duplicatesSub    = sub;
+  state.duplicatesPostId = postId;
+  if (!append) {
+    state.duplicatesAfter = null;
+    showSkeletons();
+    sortBar.style.display = 'none';
+    ctxInfo.classList.remove('visible');
+    subInput.value = '';
+    pvSubInput.value = '';
+    setMainOpen(`https://www.reddit.com/r/${encodeURIComponent(sub)}/duplicates/${encodeURIComponent(postId)}`);
+  } else {
+    sentinel.classList.add('loading');
+  }
+  try {
+    let url = `/api/r/${encodeURIComponent(sub)}/duplicates/${encodeURIComponent(postId)}`;
+    if (after) url += `?after=${encodeURIComponent(after)}`;
+    const res  = await fetch(url);
+    const data = await res.json();
+    if (myGen !== state.feedGen) return;
+    if (!res.ok) {
+      if (!append) feed.innerHTML = errState(escHtml(data.error || 'Failed to load'), 'feed');
+      return;
+    }
+    if (!append) {
+      const p = data.post;
+      if (p) {
+        document.title = `Duplicates: ${p.title} — RDVWR`;
+        document.getElementById('ctx-icon-wrap').innerHTML = '';
+        document.getElementById('ctx-title').textContent = p.title;
+        document.getElementById('ctx-stats').innerHTML =
+          `<a class="ctx-sub-link" href="/r/${escHtml(p.subreddit)}" data-nav="/r/${escHtml(p.subreddit)}">r/${escHtml(p.subreddit)}</a>`;
+        ctxInfo.classList.add('visible');
+      } else {
+        document.title = `Duplicates — RDVWR`;
+      }
+      const backSub  = escHtml(sub);
+      const backId   = escHtml(postId);
+      feed.innerHTML = `<div class="dupes-header">
+        <a class="dupes-back" href="/r/${backSub}/comments/${backId}" data-nav="/r/${backSub}/comments/${backId}">← back to post</a>
+        <span class="dupes-count">${data.posts.length} other post${data.posts.length !== 1 ? 's' : ''} linking to this URL</span>
+      </div>`;
+      if (!data.posts.length) {
+        feed.insertAdjacentHTML('beforeend', '<div class="state"><div class="state-icon">∅</div><div class="state-title">No duplicates found</div></div>');
+        return;
+      }
+    }
+    const startIdx = append ? feed.querySelectorAll('.post').length : 0;
+    feed.insertAdjacentHTML('beforeend', data.posts.map((p, i) => renderPost(p, startIdx + i, true)).join(''));
+    initMedia(feed);
+    initGifVideos(feed);
+    state.duplicatesAfter = data.after;
+    sentinel.classList.remove('loading');
+  } catch {
+    if (!append && myGen === state.feedGen) feed.innerHTML = errState('Network error', 'feed');
+  } finally {
+    if (myGen === state.feedGen) state.loading = false;
+  }
+}
