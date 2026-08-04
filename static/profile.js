@@ -51,6 +51,11 @@ export async function loadProfileTab(username, tab, sort='new', time='all', afte
     }
     if (!append) feed.innerHTML = '';
 
+    if (!append && data.archived) {
+      feed.insertAdjacentHTML('beforeend',
+        `<div class="thread-banner">u/${escHtml(username)}'s post history is not available. Data is from Arctic Shift</div>`);
+    }
+
     if (tab === 'overview') {
       const items = data.items;
       if (!items?.length && !append) {

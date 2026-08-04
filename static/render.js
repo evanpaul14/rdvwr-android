@@ -190,6 +190,10 @@ function _thumbNsfwWrap(html) {
   return `<div class="nsfw-media-wrap nsfw-thumb-wrap"><div class="nsfw-veil" role="button" tabindex="0" onclick="event.preventDefault();this.parentElement.classList.add('revealed')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.parentElement.classList.add('revealed')}"><span class="nsfw-veil-label">nsfw</span></div><div class="nsfw-content">${html}</div></div>`;
 }
 
+function _isVReddIt(url) {
+  try { return new URL(url).hostname === 'v.redd.it'; } catch { return false; }
+}
+
 function renderCompactRow(p, { sub, id, delay, visitedClass, nsfwAttr, metaTop, titleLink, footer }) {
   const mediaSrc = p.crosspost_from || p;
   const galleryCount = mediaSrc.gallery?.length > 1 ? mediaSrc.gallery.length : 0;
@@ -205,7 +209,7 @@ function renderCompactRow(p, { sub, id, delay, visitedClass, nsfwAttr, metaTop, 
     thumbHtml = _compactHasMedia(mediaSrc)
       ? `<a class="post-compact-thumb" href="${postNav}" data-nav="${postNav}">${thumbContent}${galleryBadge}</a>`
       : `<a class="post-compact-thumb" href="${escHtml(mediaSrc.url)}" target="_blank" rel="noopener">${thumbContent}</a>`;
-  } else if (!mediaSrc.is_self && mediaSrc.url && /^https?:\/\//.test(mediaSrc.url) && settings.layout !== 'minimal') {
+  } else if (!mediaSrc.is_self && mediaSrc.url && /^https?:\/\//.test(mediaSrc.url) && settings.layout !== 'minimal' && !_isVReddIt(mediaSrc.url)) {
     thumbHtml = `<a class="post-compact-thumb og-placeholder" href="${escHtml(mediaSrc.url)}" target="_blank" rel="noopener" data-og-url="${escHtml(mediaSrc.url)}" data-og-nsfw="${p.over_18 ? '1' : ''}"></a>`;
   }
   return `
@@ -280,7 +284,7 @@ export function renderPost(p, idx, showSub=false) {
   if (p.poll)        tags += `<span class="badge badge-poll">poll</span>`;
   tags += renderFlair(p, true);
   const titleClass = 'post-title'+(p.is_self?' is-italic':'');
-  const domainHtml = !p.is_self && p.domain && !p.domain.startsWith('self.') && !p.domain.endsWith('redd.it') ? `<a class="ext-link" href="${escHtml(p.url)}" target="_blank" rel="noopener"><svg width="9" height="9" viewBox="0 0 12 12" fill="none"><path d="M7 1h4m0 0v4m0-4L5.5 6.5M1 3h3.5M1 9h10M1 6h1.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>${escHtml(p.domain)}</a>` : '';
+  const domainHtml = !p.is_self && p.domain && !p.domain.startsWith('self.') && !p.domain.endsWith('redd.it') && !_isVReddIt(p.url) ? `<a class="ext-link" href="${escHtml(p.url)}" target="_blank" rel="noopener"><svg width="9" height="9" viewBox="0 0 12 12" fill="none"><path d="M7 1h4m0 0v4m0-4L5.5 6.5M1 3h3.5M1 9h10M1 6h1.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>${escHtml(p.domain)}</a>` : '';
   const subHtml = showSub ? `<a class="post-sub-link" href="/r/${sub}" data-nav="/r/${sub}">r/${sub}</a>` : '';
   const metaTop = (subHtml || tags) ? `<div class="post-meta-top">${subHtml}${tags}</div>` : '';
   const titleLink = `<a class="${titleClass}" href="/r/${sub}/comments/${id}" data-nav="/r/${sub}/comments/${id}">${escHtml(p.title)}</a>`;
@@ -343,7 +347,7 @@ export function renderPost(p, idx, showSub=false) {
       if (p.is_spoiler) thumbContent = _thumbSpoilerWrap(thumbContent);
       if (p.over_18) thumbContent = _thumbNsfwWrap(thumbContent);
       thumbHtml = `<a class="post-compact-thumb" href="${escHtml(p.url)}" target="_blank" rel="noopener">${thumbContent}</a>`;
-    } else if (p.url && /^https?:\/\//.test(p.url) && settings.layout !== 'minimal') {
+    } else if (p.url && /^https?:\/\//.test(p.url) && settings.layout !== 'minimal' && !_isVReddIt(p.url)) {
       thumbHtml = `<a class="post-compact-thumb og-placeholder" href="${escHtml(p.url)}" target="_blank" rel="noopener" data-og-url="${escHtml(p.url)}" data-og-nsfw="${p.over_18 ? '1' : ''}"></a>`;
     }
     return `
