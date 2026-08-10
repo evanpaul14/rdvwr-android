@@ -94,12 +94,25 @@ export async function xlateText(text) {
 
 export function waitForMdLibs() { return _loadMdLibs(); }
 
+// Nests chained bare-caret superscripts (^a^b^c -> a<sup>b<sup>c</sup></sup>), matching Reddit's scoping.
+function _nestSup(chain) {
+  const parts = chain.split('^');
+  let html = parts[parts.length - 1];
+  for (let i = parts.length - 2; i >= 0; i--) html = `${parts[i]}<sup>${html}</sup>`;
+  return html;
+}
+
+const _CODE_SKIP = '```[\\s\\S]*?```|`[^`]*`';
+
 export function renderMd(text) {
   if (!text) return '';
   if (!_mdLibsReady) return '';
   _initMarked();
-  const processed = embedRedditCommentVideos(linkifyReddit(text)).replace(/>!([\s\S]*?)(?:!<|$)/g, (_, inner) =>
-    `<span class="spoiler" role="button" tabindex="0">${inner}</span>`);
+  const processed = embedRedditCommentVideos(linkifyReddit(text))
+    .replace(new RegExp(`(${_CODE_SKIP})|>!([\\s\\S]*?)(?:!<|$)`, 'g'), (m, skip, inner) =>
+      skip ? skip : `<span class="spoiler" role="button" tabindex="0">${inner}</span>`)
+    .replace(new RegExp(`(${_CODE_SKIP})|\\^\\(([^)]*)\\)`, 'g'), (m, skip, inner) => skip ? skip : `<sup>${inner}</sup>`)
+    .replace(new RegExp(`(${_CODE_SKIP})|\\^(\\S+)`, 'g'), (m, skip, inner) => skip ? skip : `<sup>${_nestSup(inner)}</sup>`);
   return DOMPurify.sanitize(marked.parse(processed), { ADD_TAGS: ['span'], ADD_ATTR: ['class', 'tabindex', 'role'] });
 }
 
@@ -165,6 +178,19 @@ function renderCrosspostEmbed(orig, full=false) {
 }
 
 export function renderCrosspostFull(orig) { return renderCrosspostEmbed(orig, true); }
+
+// ── Link-to-post embed (plain link posts pointing at another Reddit post) ──────
+function renderLinkedPostEmbed(linked) {
+  const sub  = escHtml(linked.subreddit || '');
+  const id   = escHtml(linked.id || '');
+  const nav  = `/r/${sub}/comments/${id}`;
+  return `<div class="crosspost-embed">
+    <div class="crosspost-embed-header">↪ links to a post in <a href="/r/${sub}" data-nav="/r/${sub}">r/${sub}</a></div>
+    <a class="crosspost-embed-title" href="${escHtml(nav)}" data-nav="${escHtml(nav)}">${linked.title ? escHtml(linked.title) : 'View post'}</a>
+  </div>`;
+}
+
+export function renderLinkedPostFull(linked) { return renderLinkedPostEmbed(linked); }
 
 // ── Compact mode row ─────────────────────────────────────────────────────────
 function _compactThumbSrc(m) {
@@ -324,14 +350,14 @@ export function renderPost(p, idx, showSub=false) {
     return renderCompactRow(p, { sub, id, delay, visitedClass, nsfwAttr, metaTop, titleLink, footer });
   }
 
-  if (p.crosspost_from) {
+  if (p.crosspost_from || p.linked_post) {
     return `
     <div class="post${visitedClass}"${nsfwAttr} data-post-id="${id}" style="animation-delay:${delay}ms">
       <div class="post-header">
         ${metaTop}
         ${titleLink}
       </div>
-      ${renderCrosspostEmbed(p.crosspost_from)}
+      ${p.crosspost_from ? renderCrosspostEmbed(p.crosspost_from) : renderLinkedPostEmbed(p.linked_post)}
       ${footer}
     </div>`;
   }
