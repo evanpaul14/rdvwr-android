@@ -23,6 +23,29 @@ def clean_url(url):
     return url.replace("&amp;", "&") if url else None
 
 
+REDDIT_PREVIEW_HOSTS = ('preview.redd.it', 'external-preview.redd.it')
+
+
+def proxy_if_reddit_preview(url):
+    """Wrap a preview.redd.it / external-preview.redd.it URL in our /api/img proxy
+    so it loads reliably; other hosts (e.g. i.redd.it) are returned unchanged."""
+    if not url:
+        return url
+    if (urlparse(url).hostname or '') in REDDIT_PREVIEW_HOSTS:
+        return f"/api/img?url={url_quote(url, safe='')}"
+    return url
+
+
+def build_reddit_video_urls(base):
+    """Given a v.redd.it base URL (e.g. 'https://v.redd.it/abc123'), build the
+    HLS playlist / fallback video / audio-track URLs Reddit serves under it."""
+    return {
+        "hls_url":   base + '/HLSPlaylist.m3u8',
+        "video_url": base + '/DASH_480.mp4',
+        "audio_url": base + '/DASH_audio.mp4',
+    }
+
+
 def extract_redgifs_id(url):
     if not url:
         return None
@@ -87,14 +110,8 @@ def process_post(p):
         preview_img = gallery[0]["url"]
 
     # Proxy preview.redd.it / external-preview.redd.it images through backend so they load reliably
-    if preview_img:
-        _ph = urlparse(preview_img).hostname or ''
-        if _ph in ('preview.redd.it', 'external-preview.redd.it'):
-            preview_img = f"/api/img?url={url_quote(preview_img, safe='')}"
-    if thumb_url:
-        _th = urlparse(thumb_url).hostname or ''
-        if _th in ('preview.redd.it', 'external-preview.redd.it'):
-            thumb_url = f"/api/img?url={url_quote(thumb_url, safe='')}"
+    preview_img = proxy_if_reddit_preview(preview_img)
+    thumb_url = proxy_if_reddit_preview(thumb_url)
 
     # RedGifs: extract ID from post URL early so we skip Reddit's video-only preview
     redgifs_id = extract_redgifs_id(p.get("url", ""))
@@ -115,12 +132,22 @@ def process_post(p):
             hls_url   = clean_url(rvp.get("hls_url"))
             is_video  = True
 
+    # Reddit also mirrors redgifs videos (video-only, no audio) — keep it as a fallback
+    # in case the redgifs video has since been deleted/taken down upstream.
+    redgifs_fallback_url = None
+    redgifs_fallback_hls = None
+    if redgifs_id:
+        rvp = (p.get("preview") or {}).get("reddit_video_preview")
+        if rvp and rvp.get("fallback_url"):
+            redgifs_fallback_url = clean_url(rvp["fallback_url"])
+            redgifs_fallback_hls = clean_url(rvp.get("hls_url"))
+
     # Audio track for v.redd.it videos (fallback_url is video-only; audio lives at DASH_audio.mp4)
     audio_url = None
     if video_url and 'v.redd.it' in video_url:
         m = VREDDDIT_RE.match(video_url)
         if m:
-            audio_url = m.group(1) + '/DASH_audio.mp4'
+            audio_url = build_reddit_video_urls(m.group(1))['audio_url']
 
     youtube_id = None
     yt = YOUTUBE_RE.search(p.get("url", ""))
@@ -239,6 +266,8 @@ def process_post(p):
         "streamable_id":  streamable_id,
         "embed_url":      embed_url,
         "redgifs_id":     redgifs_id,
+        "redgifs_fallback_url": redgifs_fallback_url,
+        "redgifs_fallback_hls": redgifs_fallback_hls,
         "gif_url":        gif_url,
         "gif_is_video":   gif_is_video,
         "imgur_album_id": imgur_album_id,

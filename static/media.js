@@ -1,4 +1,4 @@
-import { state } from './state.js';
+import { state, setMutePref } from './state.js';
 import { settings } from './settings.js';
 import { escHtml, evictMap, renderPoll, GALLERY_SWIPE_MIN } from './utils.js';
 
@@ -9,8 +9,7 @@ function _trackVideoMute(v) {
   v.addEventListener('volumechange', () => {
     const nowMuted = v.muted || v.volume === 0;
     if (nowMuted !== state.userPrefersMuted) {
-      state.userPrefersMuted = nowMuted;
-      localStorage.setItem('mutePreference', nowMuted ? 'muted' : 'unmuted');
+      setMutePref(nowMuted);
       document.querySelectorAll('video[data-mute-tracked]').forEach(other => {
         if (other !== v) other.muted = nowMuted;
       });
@@ -135,6 +134,40 @@ const _gifObserver = new IntersectionObserver((entries) => {
   });
 }, { threshold: 0.1 });
 
+// Animated <img> gifs (giphy embeds in comments) have no play/pause API and decode
+// every frame forever once loaded, even off-screen — a thread with many gif reactions
+// tanks scroll performance. Drop the src when scrolled away and restore it on return.
+// These <img> tags have no reserved size, so dropping the src collapses them — done
+// on a short delay (cancelled if the gif re-enters view first) so a quick scroll pass
+// doesn't collapse-and-reflow the thread out from under the reader.
+const _imgGifUnloadTimers = new WeakMap();
+const _IMG_GIF_UNLOAD_DELAY = 1500;
+const _imgGifObserver = new IntersectionObserver((entries) => {
+  entries.forEach(entry => {
+    const img = entry.target;
+    if (entry.isIntersecting) {
+      const t = _imgGifUnloadTimers.get(img);
+      if (t) { clearTimeout(t); _imgGifUnloadTimers.delete(img); }
+      if (!img.src && img.dataset.gifSrc) img.src = img.dataset.gifSrc;
+    } else if (img.src && !_imgGifUnloadTimers.has(img)) {
+      _imgGifUnloadTimers.set(img, setTimeout(() => {
+        _imgGifUnloadTimers.delete(img);
+        if (img.src) {
+          img.dataset.gifSrc = img.src;
+          img.removeAttribute('src');
+        }
+      }, _IMG_GIF_UNLOAD_DELAY));
+    }
+  });
+}, { rootMargin: '200px' });
+
+export function initGifImages(container) {
+  container.querySelectorAll('img.gif-anim-img:not([data-gif-img-obs])').forEach(img => {
+    img.dataset.gifImgObs = '1';
+    _imgGifObserver.observe(img);
+  });
+}
+
 // Resolved URL cache shared across feed and postview — keyed by redgifs ID.
 // Feed's batch fetch populates it; postview hits it instantly for the same IDs.
 // Capped so a long scrolling session doesn't grow this unbounded.
@@ -167,17 +200,39 @@ export function initGifVideos(container) {
   });
 }
 
+function _buildHlsWrap(wrap) {
+  if (wrap.dataset.hlsInit) return;
+  wrap.dataset.hlsInit = '1';
+  const v = wrap.querySelector('video');
+  if (v) {
+    setupHls(v, wrap.dataset.hls, wrap.dataset.src, wrap.dataset.audio);
+    if (wrap.dataset.poster) {
+      const img = new Image();
+      img.onload = () => { v.poster = wrap.dataset.poster; };
+      img.src = wrap.dataset.poster;
+    }
+  }
+}
+
+// Reddit-video gif reactions embedded in comment markdown (.md-video-embed) are
+// built lazily like redgifs below — a gif-heavy thread can have many of these, and
+// eagerly attaching hls.js to every one fires a manifest fetch per embed on mount.
+const _hlsBuildObserver = new IntersectionObserver((entries) => {
+  entries.forEach(entry => {
+    if (entry.isIntersecting) {
+      _hlsBuildObserver.unobserve(entry.target);
+      _buildHlsWrap(entry.target);
+    }
+  });
+}, { rootMargin: '300px' });
+
 export function initVideos(container) {
-  container.querySelectorAll('[data-hls]:not([data-hls-init])').forEach(wrap => {
-    const v = wrap.querySelector('video');
-    if (v) {
-      setupHls(v, wrap.dataset.hls, wrap.dataset.src, wrap.dataset.audio);
-      if (wrap.dataset.poster) {
-        const img = new Image();
-        img.onload = () => { v.poster = wrap.dataset.poster; };
-        img.src = wrap.dataset.poster;
-      }
-      wrap.dataset.hlsInit = '1';
+  container.querySelectorAll('[data-hls]:not([data-hls-init]):not([data-hls-obs])').forEach(wrap => {
+    if (wrap.classList.contains('md-video-embed')) {
+      wrap.dataset.hlsObs = '1';
+      _hlsBuildObserver.observe(wrap);
+    } else {
+      _buildHlsWrap(wrap);
     }
   });
   container.querySelectorAll('video').forEach(_trackVideoMute);
@@ -187,64 +242,91 @@ export function observeRedgifsPrefetch(container) {
   container.querySelectorAll('.redgifs-wrap[data-rgid]:not([data-rg-prefetch])').forEach(w => {
     w.dataset.rgPrefetch = '1';
     _rgPrefetchObserver.observe(w);
+    _rgBuildObserver.observe(w);
   });
 }
 
-export async function initRedgifs(container) {
-  const wraps = [...container.querySelectorAll('.redgifs-wrap[data-rgid]:not([data-rg-init])')];
-  if (!wraps.length) return;
-  wraps.forEach(w => {
-    w.dataset.rgInit = '1';
-    _rgPrefetchObserver.unobserve(w);
-  });
-  const ids = wraps.map(w => w.dataset.rgid);
-  const coldIds = ids.filter(id => !_rgCache.has(id));
-  let batchData = {};
-  if (coldIds.length) {
-    try {
-      const res = await fetch(`/api/redgifs/batch?ids=${coldIds.join(',')}`);
-      if (res.ok) {
-        batchData = await res.json();
-        Object.entries(batchData).forEach(([id, data]) => _rgCacheSet(id, data));
-      }
-    } catch {}
-  }
-  await Promise.all(wraps.map(async wrap => {
-    const id = wrap.dataset.rgid;
-    let data = batchData[id] ?? await _rgCache.get(id) ?? null;
-    if (!data) {
-      try {
-        const res = await fetch(`/api/redgifs/${id}`);
-        data = res.ok ? await res.json() : null;
-        if (data) _rgCacheSet(id, data);
-      } catch { data = null; }
-    }
-    if (!data || (!data.hd && !data.sd)) {
+async function _buildRedgifsWrap(wrap) {
+  const id = wrap.dataset.rgid;
+  let data = _rgCache.get(id);
+  if (!data) { _prefetchRedgifs(id); data = _rgCache.get(id); }
+  data = (await data) ?? null;
+  if (!data || (!data.hd && !data.sd)) {
+    const fbHls = wrap.dataset.fbHls, fbSrc = wrap.dataset.fbSrc;
+    if (fbHls || fbSrc) {
+      wrap.dataset.hls = fbHls || '';
+      wrap.dataset.src = fbSrc || '';
+      wrap.innerHTML = `<div class="rg-fallback-badge" title="Original video was removed from RedGifs — playing Reddit's mirrored copy, which has no audio">fallback · no audio</div><video controls preload="metadata" playsinline muted></video>`;
+      setupHls(wrap.querySelector('video'), fbHls, fbSrc, null);
+      _trackVideoMute(wrap.querySelector('video'));
+    } else {
       wrap.innerHTML = `<div class="rg-error">Could not load video</div>`;
-      return;
     }
-    const videoSrc = data.hd || data.sd;
-    const rgFname = videoSrc.split('/').pop().split('?')[0] || 'video.mp4';
-    wrap.innerHTML = `<video controls playsinline preload="metadata" muted src="${escHtml(videoSrc)}"></video>`;
-    _trackVideoMute(wrap.querySelector('video'));
-    // Activate the pv-meta placeholder if present
-    const placeholder = document.querySelector(`[data-rg-dl="${CSS.escape(id)}"]`);
-    if (placeholder) {
-      const a = document.createElement('a');
-      a.className = 'share-btn';
-      a.href = videoSrc;
-      a.download = rgFname;
-      a.title = 'Download video';
-      a.innerHTML = `${_DL_ICON} download`;
-      placeholder.replaceWith(a);
-    }
-  }));
+    return;
+  }
+  const videoSrc = data.hd || data.sd;
+  const rgFname = videoSrc.split('/').pop().split('?')[0] || 'video.mp4';
+  wrap.innerHTML = `<video controls playsinline preload="metadata" muted src="${escHtml(videoSrc)}"></video>`;
+  _trackVideoMute(wrap.querySelector('video'));
+  // Activate the pv-meta placeholder if present
+  const placeholder = document.querySelector(`[data-rg-dl="${CSS.escape(id)}"]`);
+  if (placeholder) {
+    const a = document.createElement('a');
+    a.className = 'share-btn';
+    a.href = videoSrc;
+    a.download = rgFname;
+    a.title = 'Download video';
+    a.innerHTML = `${_DL_ICON} download`;
+    placeholder.replaceWith(a);
+  }
 }
+
+// Batches wraps that become near-visible within the same tick into one call to
+// /api/redgifs/batch (e.g. a page of feed cards all mounting at once), while wraps
+// that only reach the viewport later via scrolling are built individually against
+// the (likely already-prefetched) per-id cache. Building only fires near the
+// viewport instead of for the whole container up front — a comment thread with
+// dozens of gif replies no longer creates a <video> for every single one on load.
+let _rgBuildQueue = [];
+let _rgBuildScheduled = false;
+function _flushRgBuildQueue() {
+  const wraps = _rgBuildQueue;
+  _rgBuildQueue = [];
+  _rgBuildScheduled = false;
+  (async () => {
+    const coldIds = [...new Set(wraps.map(w => w.dataset.rgid).filter(id => !_rgCache.has(id)))];
+    if (coldIds.length > 1) {
+      try {
+        const res = await fetch(`/api/redgifs/batch?ids=${coldIds.join(',')}`);
+        if (res.ok) {
+          const batchData = await res.json();
+          Object.entries(batchData).forEach(([id, data]) => _rgCacheSet(id, data));
+        }
+      } catch {}
+    }
+    wraps.forEach(_buildRedgifsWrap);
+  })();
+}
+
+const _rgBuildObserver = new IntersectionObserver((entries) => {
+  entries.forEach(entry => {
+    if (!entry.isIntersecting) return;
+    const wrap = entry.target;
+    if (wrap.dataset.rgInit) return;
+    wrap.dataset.rgInit = '1';
+    _rgBuildObserver.unobserve(wrap);
+    _rgPrefetchObserver.unobserve(wrap);
+    _rgBuildQueue.push(wrap);
+    if (!_rgBuildScheduled) {
+      _rgBuildScheduled = true;
+      setTimeout(_flushRgBuildQueue, 0);
+    }
+  });
+}, { rootMargin: '200px' });
 
 export function initMedia(container) {
   initVideos(container);
   observeRedgifsPrefetch(container);
-  initRedgifs(container);
   initImgurAlbums(container);
   initOgImages(container);
   initOgDescriptions(container);
@@ -349,12 +431,12 @@ export function initOgDescriptions(container) {
 export function renderGallery(images) {
   if (!images?.length) return '';
   const thumbsHtml = images.map((img,i) =>
-    `<img class="gallery-thumb${i===0?' active':''}" src="${escHtml(img.url)}" data-idx="${i}" data-caption="${escHtml(img.caption||'')}" loading="lazy" alt="${escHtml(img.caption||'')}">`
+    `<img class="gallery-thumb${i===0?' active':''}" src="${escHtml(img.url)}" data-idx="${i}" data-caption="${escHtml(img.caption||'')}" data-w="${img.width||''}" data-h="${img.height||''}" loading="lazy" alt="${escHtml(img.caption||'')}">`
   ).join('');
   return `
     <div class="gallery">
       <div class="gallery-stage">
-        <img class="gallery-main-img" src="${escHtml(images[0].url)}" alt="${escHtml(images[0].caption||'')}">
+        <img class="gallery-main-img" src="${escHtml(images[0].url)}" alt="${escHtml(images[0].caption||'')}"${images[0].width ? ` width="${images[0].width}" height="${images[0].height}"` : ''}>
         ${images.length > 1 ? `
           <div class="gallery-nav">
             <button class="gallery-btn gallery-prev" aria-label="Previous image" disabled>‹</button>
@@ -421,7 +503,7 @@ export function mediaHtml(p, full = false) {
       <div class="devvit-overlay">
         <span class="devvit-badge"><svg width="14" height="14" viewBox="0 0 20 20" fill="none"><rect x="2" y="2" width="16" height="16" rx="3" stroke="currentColor" stroke-width="1.5"/><path d="M7 10h6M10 7v6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg> Interactive App</span>
         <div class="devvit-btns">
-          <button class="devvit-try-btn" title="Load the app in this page">Try App</button>
+          <button class="devvit-try-btn" title="Try the interactive app">Try App</button>
           <a class="devvit-open-btn" href="${href}" target="_blank" rel="noopener noreferrer">Open on Reddit ↗</a>
         </div>
       </div>
@@ -438,7 +520,7 @@ export function mediaHtml(p, full = false) {
   } else if (p.tiktok_id) {
     html = `<div class="${vc} tiktok-wrap"><iframe src="https://www.tiktok.com/player/v1/${escHtml(p.tiktok_id)}?autoplay=0&rel=0" allowfullscreen loading="lazy" sandbox="allow-scripts allow-same-origin allow-popups"></iframe></div>`;
   } else if (p.redgifs_id) {
-    html = `<div class="${vc} redgifs-wrap" data-rgid="${escHtml(p.redgifs_id)}"><div class="rg-loading"></div></div>`;
+    html = `<div class="${vc} redgifs-wrap" data-rgid="${escHtml(p.redgifs_id)}" data-fb-hls="${escHtml(p.redgifs_fallback_hls||'')}" data-fb-src="${escHtml(p.redgifs_fallback_url||'')}"><div class="rg-loading"></div></div>`;
   } else if (p.imgur_album_id) {
     html = `<div class="${vc} imgur-album-wrap" data-iaid="${escHtml(p.imgur_album_id)}"><div class="rg-loading"></div></div>`;
   } else if (p.streamable_id) {
@@ -494,6 +576,8 @@ document.addEventListener('click', e => {
 
   const t = thumbs[idx];
   mainImg.src = t.src; mainImg.alt = t.alt;
+  if (t.dataset.w) { mainImg.width = t.dataset.w; mainImg.height = t.dataset.h; }
+  else { mainImg.removeAttribute('width'); mainImg.removeAttribute('height'); }
   if (counter) counter.textContent = `${idx+1} / ${thumbs.length}`;
   if (prevBtn) prevBtn.disabled = idx === 0;
   if (nextBtn) nextBtn.disabled = idx === thumbs.length - 1;
@@ -517,16 +601,33 @@ document.addEventListener('click', e => {
   if (!permalink) return;
   btn.disabled = true;
   btn.textContent = 'Loading…';
-  fetch(`/api/devvit?url=${encodeURIComponent(permalink)}`)
+  fetch(`/api/devvit?url=${encodeURIComponent(permalink)}`, { cache: 'no-store' })
     .then(r => r.json())
     .then(d => {
       if (!d.embedded || !d.url) {
         btn.textContent = 'Not available';
         return;
       }
+      // Without a parent Reddit page doing the postMessage handshake, the
+      // Devvit SDK falls back to reading its render context (post id, poll
+      // state, signed auth token) from the URL hash — forward what the
+      // server already extracted so the app renders instead of erroring.
+      const url = d.bridge && Object.keys(d.bridge).length
+        ? `${d.url}#${encodeURIComponent(JSON.stringify(d.bridge))}`
+        : d.url;
+      // Devvit webviews send frame-ancestors allowing only reddit.com and
+      // localhost/127.0.0.1 (dev/loopback testing) — anywhere else, inline
+      // iframing is blocked by the browser, so fall back to a new tab.
+      const isLoopback = ['localhost', '127.0.0.1'].includes(location.hostname);
+      if (!isLoopback) {
+        window.open(url, '_blank', 'noopener');
+        btn.disabled = false;
+        btn.textContent = 'Try App';
+        return;
+      }
       const height = Math.max(300, Math.min(d.height || 512, 800));
       const iframe = document.createElement('iframe');
-      iframe.src = d.url;
+      iframe.src = url;
       iframe.className = 'devvit-iframe';
       iframe.style.height = `${height}px`;
       iframe.allow = 'autoplay; clipboard-write';

@@ -32,7 +32,7 @@ function _initMarked() {
   const _img  = r.image.bind(r);
   const _link = r.link.bind(r);
   r.image = (href, title, text) => {
-    if (href?.startsWith('giphy|'))   return `<img src="https://media.giphy.com/media/${href.slice(6)}/giphy.gif" alt="${text||'gif'}" loading="lazy">`;
+    if (href?.startsWith('giphy|'))   return `<img class="gif-anim-img" src="https://media.giphy.com/media/${href.slice(6)}/giphy.gif" alt="${text||'gif'}" loading="lazy">`;
     if (href?.startsWith('redgifs|')) return `<div class="md-gif-embed redgifs-wrap" data-rgid="${href.slice(8)}"><div class="rg-loading"></div></div>`;
     if (href?.startsWith('redditvid|')) {
       const base = `https://v.redd.it/${href.slice(10)}`;
@@ -47,10 +47,13 @@ function _initMarked() {
   };
   r.link = (href, title, text) => {
     const decodedText = text ? text.replace(/&amp;/g, '&') : text;
-    if (href && /\.(jpe?g|gif|png|webp|avif)(\?|$)/i.test(href) && (!decodedText || decodedText === href)) {
+    if (href && /\.(jpe?g|gif|png|webp|avif)(\?|$)/i.test(href)) {
       const proxied = (href.includes('preview.redd.it') || href.includes('external-preview.redd.it'))
         ? `/api/img?url=${encodeURIComponent(href)}` : href;
-      return `<a href="${proxied}" target="_blank" rel="noopener"><img src="${proxied}" alt="" loading="lazy"></a>`;
+      const img = `<a href="${proxied}" target="_blank" rel="noopener"><img src="${proxied}" alt="" loading="lazy"></a>`;
+      if (decodedText && decodedText !== href)
+        return `<span class="md-img-block">${img}<span class="md-img-caption">${text}</span></span>`;
+      return img;
     }
     const base = _link(href, title, text) || '';
     // Relative links and reddit.com links are intercepted by the SPA router — no _blank
@@ -104,11 +107,20 @@ function _nestSup(chain) {
 
 const _CODE_SKIP = '```[\\s\\S]*?```|`[^`]*`';
 
+// Reddit escapes underscores in raw markdown (e.g. "foo\_bar") to stop them
+// triggering italics. Marked unescapes this within [text](url) links, but not
+// inside bare autolinked URLs — so bare-URL underscores stay literally
+// backslash-escaped in the output. Strip those escapes before parsing.
+function unescapeBareUrlUnderscores(text) {
+  return text.replace(new RegExp(`(${_CODE_SKIP})|(https?:\\/\\/\\S+)`, 'g'),
+    (m, skip, url) => skip ? skip : url.replace(/\\_/g, '_'));
+}
+
 export function renderMd(text) {
   if (!text) return '';
   if (!_mdLibsReady) return '';
   _initMarked();
-  const processed = embedRedditCommentVideos(linkifyReddit(text))
+  const processed = embedRedditCommentVideos(linkifyReddit(unescapeBareUrlUnderscores(text)))
     .replace(new RegExp(`(${_CODE_SKIP})|>!([\\s\\S]*?)(?:!<|$)`, 'g'), (m, skip, inner) =>
       skip ? skip : `<span class="spoiler" role="button" tabindex="0">${inner}</span>`)
     // Backslash-escaped carets (e.g. "\^\^") are left alone so marked's own escape
@@ -315,7 +327,8 @@ export function renderPost(p, idx, showSub=false) {
   if (p.poll)        tags += `<span class="badge badge-poll">poll</span>`;
   tags += renderFlair(p, true);
   const titleClass = 'post-title'+(p.is_self?' is-italic':'');
-  const domainHtml = !p.is_self && p.domain && !p.domain.startsWith('self.') && !p.domain.endsWith('redd.it') && !_isVReddIt(p.url) ? `<a class="ext-link" href="${escHtml(p.url)}" target="_blank" rel="noopener"><svg width="9" height="9" viewBox="0 0 12 12" fill="none"><path d="M7 1h4m0 0v4m0-4L5.5 6.5M1 3h3.5M1 9h10M1 6h1.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>${escHtml(p.domain)}</a>` : '';
+  const isGalleryUrl = p.url && p.url.includes('/gallery/');
+  const domainHtml = !p.is_self && p.domain && !p.domain.startsWith('self.') && !p.domain.endsWith('redd.it') && !_isVReddIt(p.url) && !isGalleryUrl ? `<a class="ext-link" href="${escHtml(p.url)}" target="_blank" rel="noopener"><svg width="9" height="9" viewBox="0 0 12 12" fill="none"><path d="M7 1h4m0 0v4m0-4L5.5 6.5M1 3h3.5M1 9h10M1 6h1.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>${escHtml(p.domain)}</a>` : '';
   const subHtml = showSub ? `<a class="post-sub-link" href="/r/${sub}" data-nav="/r/${sub}">r/${sub}</a>` : '';
   const metaTop = (subHtml || tags) ? `<div class="post-meta-top">${subHtml}${tags}</div>` : '';
   const titleLink = `<a class="${titleClass}" href="/r/${sub}/comments/${id}" data-nav="/r/${sub}/comments/${id}">${escHtml(p.title)}</a>`;
@@ -450,6 +463,11 @@ export function renderCommentTree(comments, depth=0, sub='', postId='', postAuth
     return `<div class="comment${isDeleted?' comment-deleted':''}${startCollapsed?' collapsed':''}${isStickied?' comment-stickied':''}" data-depth="${depth}">
       <div class="comment-header">
         <button class="comment-collapse">${startCollapsed?'+':'−'}</button>
+        ${!isDeleted && settings.showAvatars ? (
+          'author_icon' in c
+            ? (c.author_icon ? `<img class="comment-avatar" src="${escHtml(c.author_icon)}" alt="" loading="lazy">` : '')
+            : `<img class="comment-avatar comment-avatar-lazy" data-author="${escHtml(c.author)}" alt="">`
+        ) : ''}
         <a class="comment-author${isMod?' is-mod':''}" href="/user/${escHtml(c.author)}" data-user="${escHtml(c.author)}" data-nav="/user/${escHtml(c.author)}">${escHtml(c.author)}</a>
         ${isMod      ? '<span class="comment-mod">MOD</span>'        : ''}
         ${isAdmin    ? '<span class="comment-admin">ADMIN</span>'    : ''}

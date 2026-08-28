@@ -1,5 +1,19 @@
+export function setMutePref(muted) {
+  state.userPrefersMuted = muted;
+  localStorage.setItem('mutePreference', muted ? 'muted' : 'unmuted');
+}
+
+export function setVolumePref(vol) {
+  state.userVolume = vol;
+  localStorage.setItem('volumePreference', String(vol));
+}
+
 export const state = {
   userPrefersMuted: localStorage.getItem('mutePreference') !== 'unmuted',
+  userVolume: (() => {
+    const v = parseFloat(localStorage.getItem('volumePreference'));
+    return isFinite(v) && v >= 0 && v <= 1 ? v : 1;
+  })(),
 
   // Feed
   currentSub: '',
@@ -39,6 +53,7 @@ export const state = {
   searchType: 'posts',
   communityAfter: null,
   userAfter: null,
+  searchFlairNav: null,
 
   // Duplicates
   duplicatesMode: false,

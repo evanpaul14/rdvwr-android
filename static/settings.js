@@ -14,6 +14,7 @@ export const DEFAULTS = {
   theme: 'dark',
   pagination: false,
   layout: 'card',
+  showAvatars: false,
 };
 
 function _load() {

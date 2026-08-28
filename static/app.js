@@ -77,7 +77,11 @@ function closeMobileSearch() {
   hideAllAutocomplete();
 }
 
+let _isBootRender = true;
+
 async function renderRoute(route, { restoreScroll=0, restorePvScroll=0 }={}) {
+  const isBoot = _isBootRender;
+  _isBootRender = false;
   closeMobileSearch();
   updateBottomNav(route);
   if (route.type !== 'search') {
@@ -113,9 +117,9 @@ async function renderRoute(route, { restoreScroll=0, restorePvScroll=0 }={}) {
       await loadMultireddit(route.username, route.multiname, route.sort, route.time || 'all', route.after || null);
       break;
     case 'post':
-      if (!feed.querySelector('.post')) await loadSubreddit(route.sub, state.currentSort);
+      if (!feed.querySelector('.post')) loadSubreddit(route.sub, state.currentSort);
       _markPostVisited(route.postId);
-      await loadPostView(route.sub, route.postId, route.commentId||'', restorePvScroll);
+      await loadPostView(route.sub, route.postId, route.commentId||'', restorePvScroll, isBoot);
       break;
     case 'user':
       closePostView();
@@ -539,6 +543,7 @@ sentinel.addEventListener('click', e => {
 document.addEventListener('click', e => {
   const spoiler = e.target.closest('.spoiler');
   if (!spoiler) return;
+  if (e.target.closest('a')) return; // let a click on a revealed link's <a> navigate instead of re-hiding
   e.stopPropagation();
   spoiler.classList.toggle('revealed');
 });
@@ -557,7 +562,15 @@ feed.addEventListener('click', e => {
     e.stopPropagation();
     const sub   = flairEl.dataset.sub;
     const flair = flairEl.dataset.flair;
-    if (sub && flair) navigateOrOpen(`/search?q=${encodeURIComponent('flair:"'+flair+'"')}&sub=${encodeURIComponent(sub)}&sort=new`, e);
+    if (sub && flair) {
+      const query = 'flair:"'+flair+'"';
+      const titleHtml = flairEl.outerHTML
+        .replace(' flair-clickable', '')
+        .replace(/ data-flair="[^"]*"/, '')
+        .replace(/ data-sub="[^"]*"/, '');
+      state.searchFlairNav = { query, html: titleHtml };
+      navigateOrOpen(`/search?q=${encodeURIComponent(query)}&sub=${encodeURIComponent(sub)}&sort=new`, e);
+    }
     return;
   }
   const card = e.target.closest('.community-card[data-nav]');
@@ -645,6 +658,7 @@ document.addEventListener('touchend', e => {
   const dy = Math.abs(e.changedTouches[0].clientY - _touchStartY);
   if (dx > TOUCH_MOVE_THRESHOLD || dy > TOUCH_MOVE_THRESHOLD) return;
   if (e.target.tagName === 'IMG' && e.target.closest('.md, .pv-media, .post-media')) return;
+  if (e.target.closest('.spoiler:not(.revealed)')) return;
   const a = e.target.closest('a[data-nav], a[href]');
   if (!a || a.getAttribute('target') === '_blank') return;
   if (interceptNavLink(a, e)) _navFromTouch = true;
@@ -654,6 +668,8 @@ document.addEventListener('touchend', e => {
 document.addEventListener('click', e => {
   if (_navFromTouch) { _navFromTouch = false; return; }
   if (e.target.tagName === 'IMG' && e.target.closest('.md, .pv-media, .post-media')) return;
+  const unrevealedSpoiler = e.target.closest('.spoiler:not(.revealed)');
+  if (unrevealedSpoiler) { e.preventDefault(); e.stopPropagation(); unrevealedSpoiler.classList.add('revealed'); return; }
   const a = e.target.closest('a[data-nav], a[href]');
   if (!a || a.getAttribute('target') === '_blank' || a.hasAttribute('download')) return;
   interceptNavLink(a, e);
@@ -662,6 +678,7 @@ document.addEventListener('click', e => {
 // Middle-click
 document.addEventListener('auxclick', e => {
   if (e.button !== 1) return;
+  if (e.target.closest('.spoiler:not(.revealed)')) return;
   const a = e.target.closest('a[data-nav], a[href]');
   if (!a || a.getAttribute('target') === '_blank' || a.hasAttribute('download')) return;
   interceptNavLink(a, e);
@@ -737,6 +754,7 @@ function _settingsHtml() {
   <div class="settings-section">
     <div class="settings-section-title">Comments</div>
     <label class="settings-row"><span class="settings-label">Default sort</span>${sel('s-comment-sort', csortOpts, settings.commentSort)}</label>
+    <label class="settings-row"><span class="settings-label">Show profile pictures</span>${chk('s-show-avatars', settings.showAvatars)}</label>
   </div>
   <div class="settings-section">
     <div class="settings-section-title">NSFW</div>
@@ -797,6 +815,11 @@ function bindSettingEvents() {
     settings.pagination = e.target.checked;
     if (!e.target.checked) sentinel.innerHTML = '';
     saveSettings();
+  });
+  settingsBody.querySelector('#s-show-avatars').addEventListener('change', e => {
+    settings.showAvatars = e.target.checked;
+    saveSettings();
+    if (postView.classList.contains('open')) changeCommentSort(state.currentCommentSort);
   });
   settingsBody.querySelector('#s-nsfw-blur').addEventListener('change', e => { settings.nsfwBlur = e.target.checked; saveSettings(); });
   settingsBody.querySelector('#s-nsfw-hide').addEventListener('change', e => { settings.nsfwHide = e.target.checked; saveSettings(); });

@@ -10,12 +10,13 @@ export const GALLERY_SWIPE_MIN     = 40;
 // Opens a real reddit.com URL in a new tab. Tags the URL so the rdvwr browser
 // extension's redirect-to-rdvwr logic (background.js) knows not to bounce
 // this navigation straight back — otherwise clicking "open in reddit" from
-// inside the app would just redirect back to the app.
+// inside the app would just redirect back to the app. Uses a URL fragment
+// (not a query param) so the tag stays client-side and is never sent to Reddit.
 export function openOnReddit(href) {
   let target = href;
   try {
     const u = new URL(href);
-    u.searchParams.set('rdvwr_bypass', '1');
+    u.hash = 'rdvwr_bypass';
     target = u.toString();
   } catch {}
   window.open(target, '_blank', 'noopener');
@@ -64,9 +65,9 @@ export function renderFlair(p, clickable=false) {
   if (p.flair_type === 'richtext' && p.flair_richtext?.length) {
     inner = p.flair_richtext.map(part => {
       if (part.e === 'text')  return escHtml(part.t || '');
-      if (part.e === 'emoji') return settings.layout === 'minimal' ? escHtml(part.a || '') : `<img class="flair-emoji" src="${escHtml(part.u)}" alt="${escHtml(part.a||'')}" loading="lazy">`;
+      if (part.e === 'emoji') return settings.layout === 'minimal' ? escHtml((part.a || '').replace(/^:|:$/g, '')) : `<img class="flair-emoji" src="${escHtml(part.u)}" alt="${escHtml(part.a||'')}" loading="lazy">`;
       return '';
-    }).join('');
+    }).join(settings.layout === 'minimal' ? ' ' : '');
   } else {
     inner = escHtml(p.flair);
   }
@@ -98,9 +99,9 @@ export function renderAuthorFlair(c) {
   if (hasRichtext) {
     inner = c.author_flair_richtext.map(part => {
       if (part.e === 'text')  return escHtml(part.t || '');
-      if (part.e === 'emoji') return settings.layout === 'minimal' ? escHtml(part.a || '') : `<img class="author-flair-emoji" src="${escHtml(part.u)}" alt="${escHtml(part.a||'')}" loading="lazy">`;
+      if (part.e === 'emoji') return settings.layout === 'minimal' ? escHtml((part.a || '').replace(/^:|:$/g, '')) : `<img class="author-flair-emoji" src="${escHtml(part.u)}" alt="${escHtml(part.a||'')}" loading="lazy">`;
       return '';
-    }).join('');
+    }).join(settings.layout === 'minimal' ? ' ' : '');
   } else {
     inner = escHtml(c.author_flair_text);
   }

@@ -1,8 +1,8 @@
 import { state } from './state.js';
 import { settings } from './settings.js';
 import { escHtml, fmtNum, fmtDate, fmtDateTime, timeAgo, setActiveButton, renderFlair, renderAwards, errState, openOnReddit } from './utils.js';
-import { initMedia, initGifVideos, mediaHtmlFull } from './media.js';
-import { renderCommentTree, renderMd, translatePost, renderCrosspostFull, renderLinkedPostFull } from './render.js';
+import { initMedia, initGifVideos, initGifImages, mediaHtmlFull } from './media.js';
+import { renderCommentTree, renderMd, translatePost, renderCrosspostFull, renderLinkedPostFull, waitForMdLibs } from './render.js';
 
 // ── Download button ───────────────────────────────────────────────────────────
 const _PV_DL_HOSTS = new Set(['v.redd.it','i.redd.it','preview.redd.it','external-preview.redd.it','i.imgur.com']);
@@ -69,6 +69,101 @@ const COMMENT_SORTS = [
   {value:'qa',            label:'Q&A'},
 ];
 
+// ── Lazy / prefetched comment avatars ────────────────────────────────────────
+// Server embeds the first AVATAR_EMBED_LIMIT commenters' pictures inline with
+// the comment payload (no pop-in), and ships an `avatar_prefetch` name->fullname
+// map for the next AVATAR_PREFETCH_LIMIT commenters. We fire a single request
+// for that whole map right away — before the user has scrolled anywhere near
+// them — through the fast bulk-lookup endpoint. One unchunked request beats
+// splitting into several: Reddit's bulk endpoint has a ~100-130ms fixed
+// per-request floor that dominates small batches, so batching more into one
+// call is strictly faster than paying that floor multiple times (measured:
+// ~0.22s for 100 users, ~0.64s for 450 in one call vs. 8x ~1s for 48 users
+// done one-by-one). Anyone beyond EMBED+PREFETCH still resolves the old way —
+// one Reddit request per user — so that fallback stays gated behind
+// IntersectionObserver rather than firing for everyone on thread load: on a
+// large thread (220+ unique commenters) that fallback can mean hundreds of
+// individual per-user requests, and firing them all at once was enough to
+// trip Reddit's rate limiting.
+// A session-wide icon cache also short-circuits repeat commenters across
+// different threads viewed in the same session.
+const _avatarIconCache = new Map();   // author -> url|null, resolved this session
+const _avatarPending    = new Set();  // author currently in flight (prefetch or scroll path)
+let _avatarQueue = new Set();
+let _avatarTimer = null;
+
+function _applyAvatarResults(map) {
+  document.querySelectorAll('.comment-avatar-lazy').forEach(img => {
+    const author = img.dataset.author;
+    if (!(author in map)) return;
+    const url = map[author];
+    _avatarObserver.unobserve(img);
+    if (url) { img.src = url; img.classList.remove('comment-avatar-lazy'); }
+    else img.remove();
+  });
+}
+
+function _flushAvatarQueue() {
+  const names = [..._avatarQueue];
+  _avatarQueue.clear();
+  _avatarTimer = null;
+  if (!names.length) return;
+  fetch(`/api/user/avatars?names=${encodeURIComponent(names.join(','))}`)
+    .then(res => res.ok ? res.json() : {})
+    .then(map => {
+      names.forEach(n => _avatarIconCache.set(n, map[n] ?? null));
+      _applyAvatarResults(map);
+    })
+    .catch(() => {});
+}
+
+function _prefetchAvatars(pairs) {
+  const entries = Object.entries(pairs).filter(([a]) => !_avatarPending.has(a) && !_avatarIconCache.has(a));
+  if (!entries.length) return;
+  entries.forEach(([a]) => _avatarPending.add(a));
+  const param = entries.map(([a, f]) => `${a}:${f}`).join(',');
+  fetch(`/api/user/avatars?pairs=${encodeURIComponent(param)}`)
+    .then(res => res.ok ? res.json() : {})
+    .then(map => {
+      entries.forEach(([a]) => _avatarIconCache.set(a, map[a] ?? null));
+      _applyAvatarResults(map);
+    })
+    .catch(() => {});
+}
+
+const _avatarObserver = new IntersectionObserver(entries => {
+  entries.forEach(entry => {
+    if (!entry.isIntersecting) return;
+    const author = entry.target.dataset.author;
+    if (_avatarIconCache.has(author)) {
+      const url = _avatarIconCache.get(author);
+      _avatarObserver.unobserve(entry.target);
+      if (url) { entry.target.src = url; entry.target.classList.remove('comment-avatar-lazy'); }
+      else entry.target.remove();
+      return;
+    }
+    if (_avatarPending.has(author)) return;
+    _avatarPending.add(author);
+    _avatarQueue.add(author);
+    if (!_avatarTimer) _avatarTimer = setTimeout(_flushAvatarQueue, 80);
+  });
+}, { rootMargin: '200px' });
+
+function initCommentAvatars(container, avatarPrefetch) {
+  // Fire the fast fullname-batched prefetch first so it claims those authors'
+  // pending slots before the slow per-name fallback below sees them.
+  if (avatarPrefetch && Object.keys(avatarPrefetch).length) _prefetchAvatars(avatarPrefetch);
+  container?.querySelectorAll('.comment-avatar-lazy').forEach(img => {
+    const cached = _avatarIconCache.get(img.dataset.author);
+    if (cached === undefined) return;
+    if (cached) { img.src = cached; img.classList.remove('comment-avatar-lazy'); }
+    else img.remove();
+  });
+  // Anyone left (not resolved by the prefetch map above) falls back to the
+  // slow one-request-per-user path — keep that gated behind scroll-into-view.
+  container?.querySelectorAll('.comment-avatar-lazy').forEach(img => _avatarObserver.observe(img));
+}
+
 // ── Private helpers ───────────────────────────────────────────────────────────
 function findComment(comments, id) {
   for (const c of comments) {
@@ -106,10 +201,17 @@ function buildCommentsHtml(data, commentId) {
 }
 
 // ── Exports ───────────────────────────────────────────────────────────────────
-export function openPostView() {
+export function openPostView(skipAnim=false) {
   document.getElementById('feed')?.querySelectorAll('video').forEach(v => { if (!v.paused) v.pause(); });
   _pvPrevFocus = document.activeElement;
-  postView.classList.add('open');
+  if (skipAnim) {
+    postView.style.transition = 'none';
+    postView.classList.add('open');
+    postView.offsetHeight; // force reflow before restoring the transition
+    postView.style.transition = '';
+  } else {
+    postView.classList.add('open');
+  }
   document.body.style.overflow = 'hidden';
   const focusEl = document.getElementById('pv-home');
   if (focusEl) focusEl.focus();
@@ -183,33 +285,43 @@ export async function changeCommentSort(sort) {
   if (!area) return;
   area.innerHTML = '<div class="state" style="padding:30px 0"><div class="state-icon">⌗</div><div class="state-title">Loading…</div></div>';
   try {
-    const apiUrl = `/api/r/${encodeURIComponent(state._pvSub)}/comments/${encodeURIComponent(state._pvPostId)}?sort=${sort}${state._pvCommentId ? `&comment=${encodeURIComponent(state._pvCommentId)}` : ''}`;
+    const apiUrl = `/api/r/${encodeURIComponent(state._pvSub)}/comments/${encodeURIComponent(state._pvPostId)}?sort=${sort}${settings.showAvatars ? '&avatars=1' : ''}${state._pvCommentId ? `&comment=${encodeURIComponent(state._pvCommentId)}` : ''}`;
     const res  = await fetch(apiUrl);
     if (!res.ok) { area.innerHTML = errState('Failed to load comments', 'comments'); return; }
     const data = await res.json();
     state._pvData = data;
     area.innerHTML = buildCommentsHtml(data, state._pvCommentId);
+    initCommentAvatars(area, data.avatar_prefetch);
   } catch {
     area.innerHTML = errState('Network error', 'comments');
   }
 }
 
-export async function loadPostView(sub, postId, commentId='', restorePvScroll=0) {
+export async function loadPostView(sub, postId, commentId='', restorePvScroll=0, skipAnim=false) {
   state._pvSub = sub; state._pvPostId = postId; state._pvCommentId = commentId; state._pvShowingContext = false;
   state.currentCommentSort = settings.commentSort;
   pvContent.innerHTML = '<div class="pv-loader"></div>';
   document.dispatchEvent(new CustomEvent('pv-load'));
   pvScroll.scrollTop = 0;
-  openPostView();
+  openPostView(skipAnim);
 
   pvBreadcrumb.innerHTML = `<a href="/r/${escHtml(sub)}" data-nav="/r/${escHtml(sub)}">r/${escHtml(sub)}</a>`;
   pvOpen.href = '#';
 
   try {
-    const apiUrl = `/api/r/${encodeURIComponent(sub)}/comments/${encodeURIComponent(postId)}?sort=${state.currentCommentSort}` + (commentId ? `&comment=${encodeURIComponent(commentId)}` : '');
-    const res  = await fetch(apiUrl);
-    const data = await res.json();
-    if (!res.ok) { pvContent.innerHTML = errState(escHtml(data.error||'Failed to load'), 'post'); return; }
+    let data;
+    const inj = window.__INITIAL_POST__;
+    if (inj && inj._sub === sub.toLowerCase() && inj._post_id === postId && state.currentCommentSort === 'confidence' && inj._comment_id === (commentId || '')) {
+      window.__INITIAL_POST__ = null;
+      data = inj;
+    } else {
+      const apiUrl = `/api/r/${encodeURIComponent(sub)}/comments/${encodeURIComponent(postId)}?sort=${state.currentCommentSort}` + (settings.showAvatars ? '&avatars=1' : '') + (commentId ? `&comment=${encodeURIComponent(commentId)}` : '');
+      const res  = await fetch(apiUrl);
+      const resData = await res.json();
+      if (!res.ok) { pvContent.innerHTML = errState(escHtml(resData.error||'Failed to load'), 'post'); return; }
+      data = resData;
+    }
+    await waitForMdLibs();
     state._pvData = data;
 
     const p = data.post;
@@ -274,6 +386,8 @@ export async function loadPostView(sub, postId, commentId='', restorePvScroll=0)
 
     initMedia(pvContent);
     initGifVideos(pvContent);
+    initGifImages(pvContent);
+    initCommentAvatars(pvContent, data.avatar_prefetch);
     if (restorePvScroll) pvScroll.scrollTop = restorePvScroll;
     translatePost(p, pvContent).catch(() => {});
   } catch {
@@ -289,6 +403,8 @@ export async function stepViewFullThread() {
     area.innerHTML = buildCommentsHtml(state._pvData, state._pvCommentId);
     initMedia(area);
     initGifVideos(area);
+    initGifImages(area);
+    initCommentAvatars(area, state._pvData.avatar_prefetch);
   } else {
     state._pvShowingContext = false;
     state._pvCommentId = '';
@@ -306,7 +422,7 @@ export async function loadMoreComments(btn) {
   btn.disabled = true;
   btn.textContent = 'Loading…';
   try {
-    const url = `/api/r/${encodeURIComponent(sub)}/morechildren/${encodeURIComponent(postId)}?children=${encodeURIComponent(ids)}&sort=${state.currentCommentSort}`;
+    const url = `/api/r/${encodeURIComponent(sub)}/morechildren/${encodeURIComponent(postId)}?children=${encodeURIComponent(ids)}&sort=${state.currentCommentSort}${settings.showAvatars ? '&avatars=1' : ''}`;
     const res  = await fetch(url);
     const data = await res.json();
     if (!res.ok) { btn.textContent = 'Failed to load'; btn.disabled = false; return; }
@@ -314,6 +430,8 @@ export async function loadMoreComments(btn) {
     const html = renderCommentTree(data.comments, depth, sub, postId, state._pvData?.post?.author || '');
     wrap.insertAdjacentHTML('afterend', html);
     initMedia(wrap.parentElement);
+    initGifImages(wrap.parentElement);
+    initCommentAvatars(wrap.parentElement, data.avatar_prefetch);
     wrap.remove();
   } catch {
     btn.textContent = 'Failed to load';
